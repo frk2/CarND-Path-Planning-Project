@@ -8,6 +8,7 @@
 #include "Eigen-3.3/Eigen/Core"
 #include "Eigen-3.3/Eigen/QR"
 #include "json.hpp"
+#include "spline.h"
 
 using namespace std;
 
@@ -239,18 +240,67 @@ int main() {
           	vector<double> next_y_vals;
 
             double dist_inc = 0.5;
-
+            int psize = previous_path_x.size();
+            vector<double> x_val;
+            vector<double> y_val;
+            double ref_x = car_x;
+            double ref_y = car_y;
+            double ref_yaw = deg2rad(car_yaw);
             if (previous_path_x.size() < 2) {
+              x_val.push_back(car_x - cos(car_yaw));
+              y_val.push_back(car_y - sin(car_yaw));
+              x_val.push_back(car_x);
+              y_val.push_back(car_y);
+            } else {
+              ref_x = previous_path_x[psize-1];
+              ref_y = previous_path_y[psize-1];
+              x_val.push_back(previous_path_x[psize-2]);
+              y_val.push_back(previous_path_y[psize-2]);
+              x_val.push_back(previous_path_x[psize-1]);
+              y_val.push_back(previous_path_y[psize-1]);
 
+
+              ref_yaw = atan2((double)previous_path_x[psize-2] - ref_x,
+                              (double)previous_path_y[psize-2] - ref_y);
             }
 
-						for (int i = 0; i< 50; i++) {
-							double next_s = car_s + (i+1)*dist_inc;
-              double next_d = car_d;
-              vector<double> xy = getXY(next_s, next_d, map_waypoints_s, map_waypoints_x, map_waypoints_y);
-              next_x_vals.push_back(xy[0]);
-              next_y_vals.push_back(xy[1]);
-						}
+            int lane = 1;
+            int lane_width = 4;
+            //Add frenet predictions:
+            for (int i = 1; i < 4; i++) {
+              vector<double> xy  = getXY(car_s + i * 20, lane_width/2 + lane * lane_width, map_waypoints_s, map_waypoints_x, map_waypoints_y);
+              x_val.push_back(xy[0]);
+              y_val.push_back(xy[1]);
+            }
+
+            for (int i = 0; i < x_val.size(); i++) {
+              double shift_x = x_val[i] - ref_x;
+              double shift_y = y_val[i] - ref_y;
+              x_val[i] = shift_x * cos(0-ref_yaw) - shift_y * sin(0-ref_yaw);
+              y_val[i] = shift_x * sin(0-ref_yaw) + shift_y * cos(0-ref_yaw);
+            }
+
+
+            //get ready for splinin
+            tk::spline sp;
+            sp.set_points(x_val, y_val);
+          for (int i = 0; i < previous_path_x.size(); i++) {
+            next_x_vals[i] = previous_path_x[i];
+            next_y_vals[i] = previous_path_y[i];
+          }
+
+          for (int i = 0; i < 50 - previous_path_x.size(); i++) {
+            double x_spline = i* 10;
+            double y_spline  = sp(x_spline);
+
+            double x_rot = x_spline * cos(ref_yaw) - y_spline * sin(ref_yaw);
+            double y_rot = x_spline * sin(ref_yaw) + y_spline * cos(ref_yaw);
+            x_rot += ref_x;
+            y_rot += ref_y;
+            next_x_vals.push_back(x_rot);
+            next_y_vals.push_back(y_rot);
+
+          }
 
           	// TODO: define a path made up of (x,y) points that the car will visit sequentially every .02 seconds
           	msgJson["next_x"] = next_x_vals;
