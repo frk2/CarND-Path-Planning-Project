@@ -238,7 +238,8 @@ int main() {
 
           	vector<double> next_x_vals;
           	vector<double> next_y_vals;
-
+            next_x_vals.reserve(50);
+            next_y_vals.reserve(50);
             double dist_inc = 0.5;
             int psize = previous_path_x.size();
             vector<double> x_val;
@@ -247,21 +248,23 @@ int main() {
             double ref_y = car_y;
             double ref_yaw = deg2rad(car_yaw);
             if (previous_path_x.size() < 2) {
-              x_val.push_back(car_x - cos(car_yaw));
-              y_val.push_back(car_y - sin(car_yaw));
+              x_val.push_back(car_x - cos(ref_yaw));
+              y_val.push_back(car_y - sin(ref_yaw));
               x_val.push_back(car_x);
               y_val.push_back(car_y);
             } else {
               ref_x = previous_path_x[psize-1];
               ref_y = previous_path_y[psize-1];
-              x_val.push_back(previous_path_x[psize-2]);
-              y_val.push_back(previous_path_y[psize-2]);
-              x_val.push_back(previous_path_x[psize-1]);
-              y_val.push_back(previous_path_y[psize-1]);
+              double prev_ref_x = previous_path_x[psize-2];
+              double prev_ref_y = previous_path_y[psize-2];
+              x_val.push_back(prev_ref_x);
+              y_val.push_back(prev_ref_y);
+              x_val.push_back(ref_x);
+              y_val.push_back(ref_y);
 
 
-              ref_yaw = atan2((double)previous_path_x[psize-2] - ref_x,
-                              (double)previous_path_y[psize-2] - ref_y);
+              ref_yaw = atan2(ref_y - prev_ref_y,
+                              ref_x - prev_ref_x);
             }
 
             int lane = 1;
@@ -284,15 +287,24 @@ int main() {
             //get ready for splinin
             tk::spline sp;
             sp.set_points(x_val, y_val);
-          for (int i = 0; i < previous_path_x.size(); i++) {
-            next_x_vals[i] = previous_path_x[i];
-            next_y_vals[i] = previous_path_y[i];
-          }
 
-          for (int i = 0; i < 50 - previous_path_x.size(); i++) {
-            double x_spline = i* 10;
+            for (int i = 0; i < previous_path_x.size(); i++) {
+              next_x_vals.push_back(previous_path_x[i]);
+              next_y_vals.push_back(previous_path_y[i]);
+            }
+
+          double target_x = 20;
+          double target_y = sp(target_x);
+          double target_dist = sqrt((target_x * target_x) + target_y*target_y);
+          double add_on = 0;
+          double refvel = 40;
+
+          double N = target_dist / ( 0.02 * refvel / 2.24 );
+
+          for (int i = 0; i < (50 - previous_path_x.size()); i++) {
+            double x_spline = add_on + target_x / N;
             double y_spline  = sp(x_spline);
-
+            add_on = x_spline;
             double x_rot = x_spline * cos(ref_yaw) - y_spline * sin(ref_yaw);
             double y_rot = x_spline * sin(ref_yaw) + y_spline * cos(ref_yaw);
             x_rot += ref_x;
