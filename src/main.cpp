@@ -19,6 +19,10 @@ using json = nlohmann::json;
 constexpr double pi() { return M_PI; }
 double deg2rad(double x) { return x * pi() / 180; }
 double rad2deg(double x) { return x * 180 / pi(); }
+double refvel = 0;
+int lane = 1;
+int lane_change_cooldown = 0;
+bool too_close = false;
 
 // Checks if the SocketIO event has JSON data.
 // If there is data the JSON object in string format will be returned,
@@ -159,6 +163,154 @@ vector<double> getXY(double s, double d, vector<double> maps_s, vector<double> m
 	return {x,y};
 
 }
+bool myfn(pair<double,double> i, pair<double,double> j) { return i.second<j.second; }
+bool myfn2(double i, double j) { return i<j; }
+
+
+string getNextState(vector< vector<double> > sensor_fusion, double car_s, double car_end_s, int lane, int prev_size) {
+  if (!too_close)
+    return "KL";
+
+  /*
+   * this code is heavily borrowed from the behavior planning quiz:
+   *
+    Updates the "state" of the vehicle by assigning one of the
+    following values to 'self.state':
+
+    "KL" - Keep Lane
+     - The vehicle will attempt to drive its target speed, unless there is
+       traffic in front of it, in which case it will slow down.
+
+    "LCL" or "LCR" - Lane Change Left / Right
+     - The vehicle will IMMEDIATELY change lanes and then follow longitudinal
+       behavior for the "KL" state in the new lane.
+
+    "PLCL" or "PLCR" - Prepare for Lane Change Left / Right (Unimplemented)
+     - The vehicle will find the nearest vehicle in the adjacent lane which is
+       BEHIND itself and will adjust speed to try to get behind that vehicle.
+
+    */
+  vector<pair<double,double>> lane_speeds;
+  for (int i = 0 ; i < 3; i++) {
+    lane_speeds.push_back(make_pair(-1,500));
+  }
+
+  vector<double> lane_collision_cost;
+  for (int i =0;i<3;i++) {
+    lane_collision_cost.push_back(0);
+  }
+  bool is_blocked_on_right = false;
+  bool is_blocked_on_left = false;
+  double lane_watch_s = 20;
+  double fudge_s = 10;
+  for (auto sens : sensor_fusion) {
+    double speeds = 0;
+    int i = sens[0];
+    double vx = sens[3];
+    double vy = sens[4];
+    double s = sens[5];
+    double d = sens[6];
+    double car_speed = sqrt(vx * vx + vy * vy);
+    double end_check_s = s + prev_size * 0.02 * car_speed;
+
+    int car_lane = floor(d / 4);
+    bool in_s_range = fabs(end_check_s - car_end_s - fudge_s) < lane_watch_s; //safety net
+    bool close_enough = end_check_s > car_end_s && (end_check_s - car_end_s < 100);
+    if (car_lane >= 0 && car_lane <= 2) {
+      if (car_lane == (lane + 1) && in_s_range) {
+        cout << "Blocked on the right cuz car in lane " << car_lane << " at s: " << s << " ecs: " << end_check_s << " end_s: " << car_end_s << endl;
+        is_blocked_on_right = true;
+        lane_collision_cost[car_lane] = 1;
+      } else if (car_lane == (lane - 1 ) && in_s_range) {
+        cout << "Blocked on the left cuz car in lane " << car_lane << " at s: " << s << " ecs: " << end_check_s << " end_s: " << car_end_s << endl;
+        is_blocked_on_left = true;
+        lane_collision_cost[car_lane] = 1;
+      } else {
+        lane_collision_cost[car_lane] = 0;
+      }
+
+      if (close_enough && (lane_speeds[car_lane].first > end_check_s || lane_speeds[car_lane].first == -1)) {
+        lane_speeds[car_lane] = std::make_pair(end_check_s, car_speed);
+      }
+    }
+  }
+
+  auto mx_speed = *max_element(lane_speeds.begin(), lane_speeds.end(), myfn);
+  auto mn_speed = *min_element(lane_speeds.begin(), lane_speeds.end(), myfn);
+  double max_speed = mx_speed.second;
+  double min_speed = mn_speed.second;
+  std::vector<double> lane_speed_cost;
+  lane_speed_cost.reserve(3);
+  if (max_speed > 0) {
+    for (int i = 0; i < 3; i++) {
+      lane_speed_cost[i] = (max_speed - lane_speeds[i].second + min_speed) / max_speed;
+//      cout << "speedcost on lane: " << to_string(i) << " : " << to_string(lane_speed_cost[i]) << endl;
+    }
+  } else {
+    return "KL";
+  }
+
+  std::vector<double> lane_cost;
+  for (int i = 0; i < 3; i++) {
+    double lcost = lane_collision_cost[i] == 0 ? lane_speed_cost[i] : 1.0;
+    lane_cost.push_back(lcost);
+//    cout << "Lane " << to_string(i) << " Cost: " << to_string(lane_cost[i]) << " ccost:" << to_string(lane_collision_cost[i]) << endl;
+  }
+  int min_cost_lane = distance(lane_cost.begin() ,min_element(lane_cost.begin(), lane_cost.end(), myfn2));
+  string state;
+  if (min_cost_lane == lane) {
+    state = "KL";
+  } else if (min_cost_lane > lane) {
+    if (is_blocked_on_right)
+      state = "PLCR"; // Basically KL
+    else
+      state = "LCR";
+  } else {
+    if (is_blocked_on_left)
+      state = "PLCL"; // Basically KL
+    else
+      state = "LCL";
+  }
+  cout << "Current lane " << lane << " best lane: " << min_cost_lane << " State : " << state << endl;
+  return state;
+
+}
+double getTargetVelocityInLane(vector<vector<double>> sensor_fusion, double car_end_s, int prev_size, int lane, double ref_vel, double max_velocity, double target_acc) {
+
+  double car_speed = 0;
+  for (auto sens : sensor_fusion) {
+    double vx = sens[3];
+    double vy = sens[4];
+    double s = sens[5];
+    double d = sens[6];
+
+     car_speed = sqrt(vx*vx + vy*vy); //convert to MPH
+    double car_speed_mph = car_speed * 2.237;
+    double end_check_s = s + prev_size*0.02*car_speed;
+    if (d > (4*lane) && d < (4+4*lane)) {
+      //car is in yo lane
+      if (end_check_s > car_end_s){
+        if ((end_check_s - car_end_s) < 30) {
+          too_close = true;
+//          cout << "First close encounter, decreasing speed" << endl;
+          return fmax(fmax(0, car_speed_mph-2), ref_vel - target_acc * 0.02); //tracks the car nicely
+        } else if (too_close && (end_check_s - car_end_s) < 40) {
+//          cout << "Tracking car. car speed:" << car_speed_mph<< " want speed: " << (ref_vel + target_acc * 0.02) << endl;
+          double new_speed = ref_vel + target_acc * 0.02;
+          return new_speed > car_speed_mph ? car_speed_mph : new_speed;
+        }
+      }
+    }
+  }
+
+  if (too_close) {
+    cout << "Aaah Wide open road.." << endl;
+    too_close  = false;
+  }
+
+
+  return fmin(max_velocity, ref_vel + target_acc * 0.02);
+}
 
 int main() {
   uWS::Hub h;
@@ -238,8 +390,7 @@ int main() {
 
           	vector<double> next_x_vals;
           	vector<double> next_y_vals;
-            next_x_vals.reserve(50);
-            next_y_vals.reserve(50);
+
             double dist_inc = 0.5;
             int psize = previous_path_x.size();
             vector<double> x_val;
@@ -257,63 +408,83 @@ int main() {
               ref_y = previous_path_y[psize-1];
               double prev_ref_x = previous_path_x[psize-2];
               double prev_ref_y = previous_path_y[psize-2];
-              x_val.push_back(prev_ref_x);
-              y_val.push_back(prev_ref_y);
-              x_val.push_back(ref_x);
-              y_val.push_back(ref_y);
-
-
               ref_yaw = atan2(ref_y - prev_ref_y,
                               ref_x - prev_ref_x);
+              x_val.push_back(prev_ref_x);
+              y_val.push_back(prev_ref_y);
+
+              x_val.push_back(ref_x);
+              y_val.push_back(ref_y);
             }
 
-            int lane = 1;
+            lane_change_cooldown = max(0, lane_change_cooldown - (50-psize));
+            if (!lane_change_cooldown) {
+              string state = getNextState(sensor_fusion, car_s, end_path_s, lane, psize);
+              if (state == "LCR") {
+                lane_change_cooldown = 50*5;
+                lane += 1;
+              } else if (state == "LCL") {
+                lane_change_cooldown = 50*5;
+                lane -= 1;
+              }
+            }
             int lane_width = 4;
             //Add frenet predictions:
             for (int i = 1; i < 4; i++) {
-              vector<double> xy  = getXY(car_s + i * 20, lane_width/2 + lane * lane_width, map_waypoints_s, map_waypoints_x, map_waypoints_y);
+              vector<double> xy  = getXY(car_s + i * 50, lane_width/2 + lane * lane_width, map_waypoints_s, map_waypoints_x, map_waypoints_y);
               x_val.push_back(xy[0]);
               y_val.push_back(xy[1]);
             }
 
             for (int i = 0; i < x_val.size(); i++) {
+
               double shift_x = x_val[i] - ref_x;
               double shift_y = y_val[i] - ref_y;
               x_val[i] = shift_x * cos(0-ref_yaw) - shift_y * sin(0-ref_yaw);
               y_val[i] = shift_x * sin(0-ref_yaw) + shift_y * cos(0-ref_yaw);
             }
 
+            bool bad_points = false;
+            if (!((x_val[0] < x_val[1]) && (x_val[1] < x_val[2]))) {
+              bad_points = true; // so this is a terrible hack but I have no idea how to do better.
+              // if true then this iteration is wasted.
+            }
 
             //get ready for splinin
-            tk::spline sp;
-            sp.set_points(x_val, y_val);
 
             for (int i = 0; i < previous_path_x.size(); i++) {
               next_x_vals.push_back(previous_path_x[i]);
               next_y_vals.push_back(previous_path_y[i]);
             }
 
-          double target_x = 20;
-          double target_y = sp(target_x);
-          double target_dist = sqrt((target_x * target_x) + target_y*target_y);
-          double add_on = 0;
-          double refvel = 40;
+          if (!bad_points) {
 
-          double N = target_dist / ( 0.02 * refvel / 2.24 );
+            tk::spline sp;
+            sp.set_points(x_val, y_val);
 
-          for (int i = 0; i < (50 - previous_path_x.size()); i++) {
-            double x_spline = add_on + target_x / N;
-            double y_spline  = sp(x_spline);
-            add_on = x_spline;
-            double x_rot = x_spline * cos(ref_yaw) - y_spline * sin(ref_yaw);
-            double y_rot = x_spline * sin(ref_yaw) + y_spline * cos(ref_yaw);
-            x_rot += ref_x;
-            y_rot += ref_y;
-            next_x_vals.push_back(x_rot);
-            next_y_vals.push_back(y_rot);
+            double target_x = 30;
+            double target_y = sp(target_x);
+            double target_dist = sqrt((target_x * target_x) + target_y * target_y);
+            double add_on = 0;
+            refvel = getTargetVelocityInLane(sensor_fusion, psize > 0 ? end_path_s : car_s, psize, lane, refvel, 45,
+                                             20);
 
+            double N = target_dist / (0.02 * refvel / 2.24);
+
+            for (int i = 0; i < (50 - previous_path_x.size()); i++) {
+              double x_spline = add_on + target_x / N;
+              double y_spline = sp(x_spline);
+              add_on = x_spline;
+              double x_rot = x_spline * cos(ref_yaw) - y_spline * sin(ref_yaw);
+              double y_rot = x_spline * sin(ref_yaw) + y_spline * cos(ref_yaw);
+              x_rot += ref_x;
+              y_rot += ref_y;
+              next_x_vals.push_back(x_rot);
+              next_y_vals.push_back(y_rot);
+              //cout << x_rot << "," << y_rot << " | ";
+
+            }
           }
-
           	// TODO: define a path made up of (x,y) points that the car will visit sequentially every .02 seconds
           	msgJson["next_x"] = next_x_vals;
           	msgJson["next_y"] = next_y_vals;
