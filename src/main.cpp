@@ -240,6 +240,7 @@ string getNextState(vector< vector<double> > sensor_fusion, double car_s, double
   double max_speed = mx_speed.second;
   double min_speed = mn_speed.second;
   std::vector<double> lane_speed_cost;
+
   lane_speed_cost.reserve(3);
   if (max_speed > 0) {
     for (int i = 0; i < 3; i++) {
@@ -251,10 +252,13 @@ string getNextState(vector< vector<double> > sensor_fusion, double car_s, double
   }
 
   std::vector<double> lane_cost;
+  vector<double> lane_change_cost = {1, 1 , 1};
+  lane_change_cost[lane] = 0;
+  vector<double> weights = {0.2, 0.8};
   for (int i = 0; i < 3; i++) {
     double lcost = lane_collision_cost[i] == 0 ? lane_speed_cost[i] : 1.0;
-    lane_cost.push_back(lcost);
-//    cout << "Lane " << to_string(i) << " Cost: " << to_string(lane_cost[i]) << " ccost:" << to_string(lane_collision_cost[i]) << endl;
+    lane_cost.push_back(weights[1] * lcost + weights[0] * lane_change_cost[i]);
+    cout << "Lane " << to_string(i) << " Cost: " << to_string(lane_cost[i]) << " ccost:" << to_string(lane_collision_cost[i]) << endl;
   }
   int min_cost_lane = distance(lane_cost.begin() ,min_element(lane_cost.begin(), lane_cost.end(), myfn2));
   string state;
